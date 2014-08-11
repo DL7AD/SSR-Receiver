@@ -1,0 +1,256 @@
+package ssrreceiver;
+
+import java.util.Iterator;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
+import java.util.Enumeration;
+import javax.comm.SerialPort;
+import javax.comm.CommPortIdentifier;
+import java.io.InputStream;
+import java.io.IOException;
+import java.io.FileInputStream;
+import java.io.DataInputStream;
+
+import javax.comm.PortInUseException;
+import javax.comm.UnsupportedCommOperationException;
+import java.io.FileNotFoundException;
+
+/**
+ * Decoder of SSR-Project. Connects to a server and streams it into a Airspace.
+ * Prints every second a table of all airplanes of the Airspace. If there is no
+ * stream currently incoming, the programm will not be blocked. The values
+ * displayed, are shown in aviatic units.
+ * 
+ * @author Sven Steudte DO1GJ DOK D20
+ * @version 0.2a
+ */
+
+public class SSRReceiver {
+    
+    private static Airspace airspace = Airspace.getInstance();
+    private static float distanceHighscore; //Distance of the squitter which was received with the most distance
+    private static float dataRate;
+    private static int updateNumber;
+    private static long lastUpdateDataRate;
+    private static int bitsReceived;
+    private static long lastUpdate;
+    
+    private static int updateInterval = 250;
+    
+    public static void main(String[] args) {
+        
+        //Set my position
+        Airspace.myPosition[0] = 52.57440d;
+        Airspace.myPosition[1] = 13.49934d;
+        
+        //SSR Decoding
+        //String commPort = "COM5";
+        //Adsb.serialSSR(commPort);
+        
+        //File Decoding
+        String filename = "C:/06062012.bin";
+        SSRReceiver.fileSSR(filename,1000000);
+
+    }
+    /**
+     * Initializes a SSR Decoding by a serial Input.
+     * @param commPort COM Port of Receiver
+     */
+    private static void serialSSR(String commPort) {
+        //Find Serial Port
+        Enumeration portList = CommPortIdentifier.getPortIdentifiers();
+        while(portList.hasMoreElements()) {
+            CommPortIdentifier portId = (CommPortIdentifier)portList.nextElement();
+            if(portId.getPortType() == CommPortIdentifier.PORT_SERIAL && portId.getName().equals(commPort)) {
+                try {
+                    //Open Serial Port
+                    SerialPort serialPort = (SerialPort)portId.open("SSR", 2000);
+                    serialPort.setSerialPortParams(115200, SerialPort.DATABITS_8, SerialPort.STOPBITS_1, SerialPort.PARITY_NONE);
+                    
+                    //Create Input Stream
+                    InputStream inputStream = serialPort.getInputStream();
+                    
+                    //Main Loop for SSR receiving (Main SSR Decoding starts here)
+                    while(true) {
+                        
+                        //Read buffer while bytes are available in buffer
+                        while(inputStream.available() > 0) {
+                            
+                            //Read Serial Buffer until there is a break or no buffer
+                            String commResponse = "";
+                            int c;
+                            do {
+                                c = inputStream.read();
+                                if(c != 13 && c != 10)
+                                    commResponse += (char)c;
+                            } while(c != 13 && c != 10 && inputStream.available() > 0);
+                            
+                            //Packet does not contain any data or packet is not received fully
+                            //If Squitter is not received fully, it will be filled up in the next loop
+                            if(commResponse.equals("") || (c != 10 && c != 13))
+                                continue;
+                            
+                            if(commResponse.charAt(0) == '*') { //Correctly decoded Squitter
+                                try {
+                                    SSRReceiver.airspace.decodeSquitter(commResponse.substring(1, commResponse.length() - 1)); //Insert squitter
+                                } catch(NumberFormatException e) { //Got invalid format in the line
+                                } catch(SquitterTooShort e) { //Got invalid format in the line
+                                } catch(UnknownTC e) { //Got unknown TC
+                                    e.printStackTrace();
+                                    System.exit(1);
+                                } catch(UnknownDF e) { //Got unknown DF
+                                    e.printStackTrace();
+                                    System.exit(1);
+                                } catch(UnknownSubtype e) { //Got unknown NIC
+                                    e.printStackTrace();
+                                    System.exit(1);
+                                }
+                                
+                                SSRReceiver.bitsReceived += commResponse.length() * 4 - 8; //Statistics for Datarate
+                            }
+                        }
+                        
+                        SSRReceiver.airspace.checkTimeout(); //Check airplanes to be deleted because their timeout exceeded
+                        
+                        //Check if update is necessary
+                        if(!SSRReceiver.checkUpdate())
+                            continue;
+                        
+                        SSRReceiver.updateDataRate(); //Check for last Datarate
+                        SSRReceiver.printTable(); //Print updated table
+                    }
+                } catch (PortInUseException e) {
+                    System.out.println("There is another program using this port");
+                } catch (IOException e) {
+                } catch (UnsupportedCommOperationException e) {}
+            }
+        }
+    }
+    /**
+     * Initializes a SSR Decoding by a file.
+     * @param filename Filename of File, that should be imported
+     * @param speed Lines that should be read in one Update Interval
+     */
+    private static void fileSSR(String filename, int speed) {
+        try {
+            FileInputStream fstream = new FileInputStream(filename);
+            DataInputStream in = new DataInputStream(fstream);
+            BufferedReader br = new BufferedReader(new InputStreamReader(in));
+            String strLine;
+            
+            //Main Loop for SSR receiving until file reached EOF (Main SSR Decoding starts here)
+            while(br.ready()) {
+                
+                int lines = 0;
+                
+                //Read some lines from the buffer
+                while(lines++ < speed && (strLine = br.readLine()) != null) {
+                    
+                    //Packet does not contain any data
+                    if(strLine.equals(""))
+                        continue;
+                    
+                    if(strLine.charAt(0) == '*') { //Correctly decoded Squitter
+                        try {
+                            SSRReceiver.airspace.decodeSquitter(strLine.substring(1, strLine.length() - 1)); //Insert squitter
+                        } catch(NumberFormatException e) { //Got invalid format in the line
+                        } catch(SquitterTooShort e) { //Got invalid format in the line
+                        } catch(UnknownTC e) { //Got unknown TC
+                            e.printStackTrace();
+                            System.exit(1);
+                        } catch(UnknownDF e) { //Got unknown DF
+                            e.printStackTrace();
+                            System.exit(1);
+                        } catch(UnknownSubtype e) { //Got unknown NIC
+                            e.printStackTrace();
+                            System.exit(1);
+                        }
+                        
+                        SSRReceiver.bitsReceived += strLine.length() * 4 - 8; //Statistics for Datarate
+                    }
+                }
+                
+                SSRReceiver.airspace.checkTimeout(); //Check airplanes to be deleted because their timeout exceeded
+                
+                //Check if update is necessary
+                if(!SSRReceiver.checkUpdate())
+                    continue;
+                
+                SSRReceiver.updateDataRate(); //Check for last Datarate
+                SSRReceiver.printTable(); //Print updated table
+                
+                //Block Thread for one Update Interval
+                try {
+                    Thread.sleep(SSRReceiver.updateInterval); //Block Thread
+                } catch(InterruptedException e) { }
+            }
+        } catch(FileNotFoundException e) {
+            System.out.println("The file was not found");
+        } catch(IOException e) {}
+    }
+    /**
+     * This Method checks if there must be a Datarate Update. Datarate Updates
+     * are made every 3 seconds.
+     */
+    private static void updateDataRate() {
+        if(SSRReceiver.lastUpdateDataRate + 3000 <= System.currentTimeMillis()) {
+            SSRReceiver.dataRate = Math.round(SSRReceiver.bitsReceived / 30f) / 100f;
+            SSRReceiver.bitsReceived = 0;
+            SSRReceiver.lastUpdateDataRate = System.currentTimeMillis();
+        }
+    }
+    /**
+     * This Method cehcks if there must be a Update in the table. The Interval
+     * is defined in updateInterval.
+     * @return Returns true, if the last Update exceeds the Update Interval
+     */
+    private static boolean checkUpdate() {
+        if(SSRReceiver.lastUpdate + SSRReceiver.updateInterval >= System.currentTimeMillis()) {
+            try {
+                Thread.sleep(SSRReceiver.updateInterval / 10); //Block Thread
+            } catch(InterruptedException e) { }
+            return false;
+        }
+        SSRReceiver.lastUpdate = System.currentTimeMillis();
+        return true;
+    }
+    /**
+     * Prints the table of all Aircrafts and their data.
+     */
+    private static void printTable() {
+        //Print some empty spaces to delete the old table
+        for(int i = 0; i < 10; i++)
+            System.out.println();
+        
+        //Print header of table
+        short[] activeAircrafts = SSRReceiver.airspace.activeAircrafts();
+        System.out.println( "Update: " + ++SSRReceiver.updateNumber );
+        System.out.println( "Aircrafts in range: " + (activeAircrafts[0]+activeAircrafts[1]) );
+        System.out.println( "Aircrafts with pos: " + activeAircrafts[1] );
+        System.out.println( "Distance Highscore: " + Math.round(SSRReceiver.distanceHighscore) + "nm (" + Math.round(SSRReceiver.distanceHighscore*1.852) + "km)" );
+        System.out.println( "Transmission rate: " + SSRReceiver.dataRate + "kbit/s" );
+        System.out.println( "Ident |Flight  |Latitude |Longitude |Altitude|Speed|Heading|Squawk|Distance|Timeout|Last Packet" );
+
+        //Print table of all aircrafts
+        Iterator<Aircraft> aircrafts = SSRReceiver.airspace.getAllAircraftsSorted();
+        while(aircrafts.hasNext()) {
+            Aircraft aircraft = aircrafts.next();
+            System.out.printf(
+                "%6s|%-8s|%09.6f|%010.6f|%-8d|%5.1f|%7.1f|%04d  |%-8.1f|%02d     |%s %n",
+                Integer.toHexString(aircraft.getIcaoIdent()),
+                aircraft.getFlightIdent(),
+                aircraft.getPosition()[0],
+                aircraft.getPosition()[1],
+                aircraft.getAltitude(),
+                aircraft.getAirspeed(),
+                aircraft.getHeading(),
+                aircraft.getSquawk(),
+                aircraft.getDistance(),
+                (System.currentTimeMillis() - aircraft.getLastChange()) / 1000,
+                aircraft.getLastPacket()
+            );
+            if(SSRReceiver.distanceHighscore < aircraft.getDistance()) //Check for distance highscore
+                SSRReceiver.distanceHighscore = (float)aircraft.getDistance();
+        }
+    }
+}
